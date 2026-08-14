@@ -1,10 +1,22 @@
-﻿namespace SmartAssetHub.Infra
+﻿using Amazon.CDK;
+
+namespace SmartAssetHub.Infra;
+
+internal class Program
 {
-    internal class Program
+    private static void Main(string[] args)
     {
-        static void Main(string[] args)
+        var app = new App();
+
+        new SmartAssetStack(app, "SmartAssetHubStack", new StackProps
         {
-            Console.WriteLine("Hello, World!");
-        }
+            Env = new Amazon.CDK.Environment
+            {
+                Account = System.Environment.GetEnvironmentVariable("CDK_DEFAULT_ACCOUNT"),
+                Region = System.Environment.GetEnvironmentVariable("CDK_DEFAULT_REGION") ?? "us-east-1"
+            }
+        });
+
+        app.Synth();
     }
 }

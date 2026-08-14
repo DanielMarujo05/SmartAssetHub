@@ -1,67 +1,171 @@
+using Amazon.Comprehend;
+using Amazon.Comprehend.Model;
+using Amazon.DynamoDBv2;
+using Amazon.DynamoDBv2.Model;
 using Amazon.Lambda.Core;
 using Amazon.Lambda.S3Events;
+using Amazon.Rekognition;
+using Amazon.Rekognition.Model;
 using Amazon.S3;
-using Amazon.S3.Util;
+using Amazon.Textract;
+using Amazon.Textract.Model;
 
-// Assembly attribute to enable the Lambda function's JSON input to be converted into a .NET class.
+//assembly para habilitar a conversao da entrada JSON da funcao Lambda em uma classe .NET
 [assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
 
-namespace SmartAssetHub.Functions
+namespace SmartAssetHub.Functions;
+
+public class Function
 {
-    public class Function
+    private readonly IAmazonS3 _s3Client;
+    private readonly IAmazonDynamoDB _dynamoDbClient;
+    private readonly IAmazonRekognition _rekognitionClient;
+    private readonly IAmazonTextract _textractClient;
+    private readonly IAmazonComprehend _comprehendClient;
+    private readonly string _tableName;
+
+    public Function()
     {
-        IAmazonS3 S3Client { get; set; }
+        _s3Client = new AmazonS3Client();
+        _dynamoDbClient = new AmazonDynamoDBClient();
+        _rekognitionClient = new AmazonRekognitionClient();
+        _textractClient = new AmazonTextractClient();
+        _comprehendClient = new AmazonComprehendClient();
+        _tableName = Environment.GetEnvironmentVariable("TABLE_NAME") ?? "SmartAssetMetadata";
+    }
 
-        /// <summary>
-        /// Default constructor. This constructor is used by Lambda to construct the instance. When invoked in a Lambda environment
-        /// the AWS credentials will come from the IAM role associated with the function and the AWS region will be set to the
-        /// region the Lambda function is executed in.
-        /// </summary>
-        public Function()
+    public async Task FunctionHandler(S3Event s3Event, ILambdaContext context)
+    {
+        foreach (var record in s3Event.Records)
         {
-            S3Client = new AmazonS3Client();
-        }
+            var bucketName = record.S3.Bucket.Name;
+            var objectKey = System.Net.WebUtility.UrlDecode(record.S3.Object.Key);
+            var extension = Path.GetExtension(objectKey).ToLower();
 
-        /// <summary>
-        /// Constructs an instance with a preconfigured S3 client. This can be used for testing outside of the Lambda environment.
-        /// </summary>
-        /// <param name="s3Client">The service client to access Amazon S3.</param>
-        public Function(IAmazonS3 s3Client)
-        {
-            this.S3Client = s3Client;
-        }
+            context.Logger.LogInformation($"[PROCESSANDO] Arquivo: {objectKey} no Bucket: {bucketName}");
 
-        /// <summary>
-        /// This method is called for every Lambda invocation. This method takes in an S3 event object and can be used 
-        /// to respond to S3 notifications.
-        /// </summary>
-        /// <param name="evnt">The event for the Lambda function handler to process.</param>
-        /// <param name="context">The ILambdaContext that provides methods for logging and describing the Lambda environment.</param>
-        /// <returns></returns>
-        public async Task FunctionHandler(S3Event evnt, ILambdaContext context)
-        {
-            var eventRecords = evnt.Records ?? new List<S3Event.S3EventNotificationRecord>();
-            foreach (var record in eventRecords)
+            string extractedText = "";
+            var tags = new List<string>();
+
+            //processa o tipo e manda pra seu respectivo serviço AWS para processamento e geração de metadados
+            if (extension == ".jpg" || extension == ".png" || extension == ".jpeg")
             {
-                var s3Event = record.S3;
-                if (s3Event == null)
-                {
-                    continue;
-                }
-
-                try
-                {
-                    var response = await this.S3Client.GetObjectMetadataAsync(s3Event.Bucket.Name, s3Event.Object.Key);
-                    context.Logger.LogInformation(response.Headers.ContentType);
-                }
-                catch (Exception e)
-                {
-                    context.Logger.LogError($"Error getting object {s3Event.Object.Key} from bucket {s3Event.Bucket.Name}. Make sure they exist and your bucket is in the same region as this function.");
-                    context.Logger.LogError(e.Message);
-                    context.Logger.LogError(e.StackTrace);
-                    throw;
-                }
+                context.Logger.LogInformation("Executando AWS Rekognition (Imagem)...");
+                tags = await ProcessImageWithRekognitionAsync(bucketName, objectKey);
             }
+            else if (extension == ".pdf")
+            {
+                context.Logger.LogInformation("Executando AWS Textract (Documento PDF)...");
+                extractedText = await ProcessPdfWithTextractAsync(bucketName, objectKey);
+            }
+
+            //analisa o texto extraido com AWS Comprehend para extrair entidades-chave e sentimentos
+            var keyEntities = new List<string>();
+            if (!string.IsNullOrWhiteSpace(extractedText))
+            {
+                context.Logger.LogInformation("Executando AWS Comprehend no texto extraído...");
+                keyEntities = await ExtractEntitiesWithComprehendAsync(extractedText);
+            }
+
+            //salva os metadados no DynamoDB
+            await SaveToDynamoDbAsync(objectKey, extension, tags, extractedText, keyEntities);
+            context.Logger.LogInformation($"[SUCESSO] Processamento de {objectKey} concluído!");
         }
+    }
+
+    private async Task<List<string>> ProcessImageWithRekognitionAsync(string bucket, string key)
+    {
+        var request = new DetectLabelsRequest
+        {
+            Image = new Image
+            {
+                S3Object = new Amazon.Rekognition.Model.S3Object { Bucket = bucket, Name = key }
+            },
+            MaxLabels = 10,
+            MinConfidence = 75F
+        };
+
+        var response = await _rekognitionClient.DetectLabelsAsync(request);
+        return response.Labels.Select(l => l.Name).ToList();
+    }
+
+    private async Task<string> ProcessPdfWithTextractAsync(string bucket, string key)
+    {
+        var request = new DetectDocumentTextRequest
+        {
+            Document = new Amazon.Textract.Model.Document
+            {
+                S3Object = new Amazon.Textract.Model.S3Object { Bucket = bucket, Name = key }
+            }
+        };
+
+        var response = await _textractClient.DetectDocumentTextAsync(request);
+        var lines = response.Blocks
+            .Where(b => b.BlockType == Amazon.Textract.BlockType.LINE)
+            .Select(b => b.Text);
+
+        return string.Join(" ", lines);
+    }
+
+    private async Task<List<string>> ExtractEntitiesWithComprehendAsync(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return new List<string>();
+
+        var textToAnalyze = text.Length > 4500 ? text.Substring(0, 4500) : text;
+
+        //pega o idioma dominante do texto para passar para a função de extração de entidades, caso o idioma não seja identificado, o fallback será inglês ('en')
+        var languageRequest = new DetectDominantLanguageRequest
+        {
+            Text = textToAnalyze
+        };
+
+        var languageResponse = await _comprehendClient.DetectDominantLanguageAsync(languageRequest);
+
+
+        var topLanguage = languageResponse.Languages
+            .OrderByDescending(l => l.Score)
+            .FirstOrDefault();
+
+
+        string detectedCode = (topLanguage != null && topLanguage.Score > 0.5)
+            ? topLanguage.LanguageCode
+            : "en";
+
+        LanguageCode languageCode = LanguageCode.FindValue(detectedCode) ?? LanguageCode.En;
+
+        var request = new DetectEntitiesRequest
+        {
+            Text = textToAnalyze,
+            LanguageCode = languageCode
+        };
+
+        var response = await _comprehendClient.DetectEntitiesAsync(request);
+
+        return response.Entities
+            .Where(e => e.Score > 0.7)
+            .Select(e => $"{e.Type}: {e.Text}")
+            .Distinct()
+            .ToList();
+    }
+
+    private async Task SaveToDynamoDbAsync(string key, string extension, List<string> tags, string extractedText, List<string> entities)
+    {
+        var item = new Dictionary<string, AttributeValue>
+        {
+            ["DocumentId"] = new AttributeValue { S = Guid.NewGuid().ToString() },
+            ["FileName"] = new AttributeValue { S = key },
+            ["FileType"] = new AttributeValue { S = extension },
+            ["ProcessedAt"] = new AttributeValue { S = DateTime.UtcNow.ToString("o") },
+            ["ExtractedText"] = new AttributeValue { S = string.IsNullOrWhiteSpace(extractedText) ? "N/A" : extractedText }
+        };
+
+        if (tags.Any())
+            item["Tags"] = new AttributeValue { SS = tags };
+
+        if (entities.Any())
+            item["Entities"] = new AttributeValue { SS = entities };
+
+        await _dynamoDbClient.PutItemAsync(_tableName, item);
     }
 }

@@ -8,6 +8,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Amazon.CDK.Lib" Version="2.264.0" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\SmartAssetHub.Core\SmartAssetHub.Core.csproj" />
   </ItemGroup>
 
