@@ -14,7 +14,7 @@ public class SmartAssetStack : Stack
 {
     public SmartAssetStack(Construct scope, string id, IStackProps? props = null) : base(scope, id, props)
     {
-        // bucket s3 para upload de arquivos
+
         var bucket = new Bucket(this, "SmartAssetUploadBucket", new BucketProps
         {
             Versioned = true,
@@ -31,7 +31,7 @@ public class SmartAssetStack : Stack
             }
         });
 
-        //tabela DynamoDB para armazenar metadados dos arquivos
+
         var table = new Table(this, "SmartAssetMetadataTable", new TableProps
         {
             TableName = "SmartAssetMetadata",
@@ -42,13 +42,13 @@ public class SmartAssetStack : Stack
 
         var publishPath = "../SmartAssetHub.Functions/bin/Release/net8.0/linux-x64/publish";
 
-        //lambda que processa os arquivos enviados para o bucket S3 (invocada pelo evento de upload)
+
         var processorFunction = new Function(this, "SmartAssetProcessorFunction", new FunctionProps
         {
             Runtime = Runtime.DOTNET_8,
             Handler = "SmartAssetHub.Functions::SmartAssetHub.Functions.Function::FunctionHandler",
             Code = Code.FromAsset(publishPath),
-            Timeout = Duration.Seconds(60),
+            Timeout = Duration.Seconds(600),
             MemorySize = 512,
             Environment = new System.Collections.Generic.Dictionary<string, string>
             {
@@ -61,13 +61,24 @@ public class SmartAssetStack : Stack
 
         processorFunction.AddToRolePolicy(new PolicyStatement(new PolicyStatementProps
         {
-            Actions = new[] { "rekognition:DetectLabels", "rekognition:DetectText", "textract:DetectDocumentText", "textract:AnalyzeDocument", "comprehend:DetectKeyPhrases", "comprehend:DetectEntities" },
+            Actions = new[]
+            {
+                "rekognition:DetectLabels",
+                "rekognition:DetectText",
+                "textract:StartDocumentTextDetection",
+                "textract:GetDocumentTextDetection",
+                "textract:DetectDocumentText",
+                "textract:AnalyzeDocument",
+                "comprehend:DetectKeyPhrases",
+                "comprehend:DetectEntities",
+                "comprehend:DetectDominantLanguage"
+            },
             Resources = new[] { "*" }
         }));
 
         bucket.AddEventNotification(EventType.OBJECT_CREATED, new LambdaDestination(processorFunction));
 
-        //lambda pra processar as requisições de chat (invocada pelo API Gateway)
+
         var chatFunction = new Function(this, "SmartAssetChatFunction", new FunctionProps
         {
             Runtime = Runtime.DOTNET_8,
@@ -88,7 +99,7 @@ public class SmartAssetStack : Stack
             Resources = new[] { "*" }
         }));
 
-        //lambda pra gerar a URL de upload para o bucket S3 (invocada pelo API Gateway)
+
         var uploadUrlFunction = new Function(this, "SmartAssetUploadUrlFunction", new FunctionProps
         {
             Runtime = Runtime.DOTNET_8,
@@ -103,10 +114,9 @@ public class SmartAssetStack : Stack
             }
         });
 
-        bucket.GrantWrite(uploadUrlFunction);
+        bucket.GrantReadWrite(uploadUrlFunction);
         table.GrantReadData(uploadUrlFunction);
 
-        //lambda pra listar os assets (invocada pelo API Gateway)
         var assetsFunction = new Function(this, "SmartAssetAssetsFunction", new FunctionProps
         {
             Runtime = Runtime.DOTNET_8,
@@ -123,7 +133,7 @@ public class SmartAssetStack : Stack
 
         table.GrantReadData(assetsFunction);
 
-        // api gateway para expor as rotas de upload, listagem de assets e chat
+
         var api = new RestApi(this, "SmartAssetApi", new RestApiProps
         {
             RestApiName = "SmartAssetHub API",
@@ -134,19 +144,15 @@ public class SmartAssetStack : Stack
             }
         });
 
-        // Rota GET /upload-url
         var uploadUrlResource = api.Root.AddResource("upload-url");
         uploadUrlResource.AddMethod("GET", new LambdaIntegration(uploadUrlFunction));
 
-        // Rota GET /assets
         var assetsResource = api.Root.AddResource("assets");
         assetsResource.AddMethod("GET", new LambdaIntegration(assetsFunction));
 
-        // Rota POST /chat
         var chatResource = api.Root.AddResource("chat");
         chatResource.AddMethod("POST", new LambdaIntegration(chatFunction));
 
-        // Exibe no terminal a URL base da API
         new CfnOutput(this, "ApiGatewayUrl", new CfnOutputProps { Value = api.Url });
     }
 }

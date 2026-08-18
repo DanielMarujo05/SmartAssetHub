@@ -45,7 +45,6 @@ public class ChatFunction
                 };
             }
 
-            //Implementação da logica do RAG
             var scanResult = await _dynamoDbClient.ScanAsync(new ScanRequest { TableName = _tableName });
             var contextText = new StringBuilder();
 
@@ -61,7 +60,7 @@ public class ChatFunction
                 contextText.AppendLine();
             }
 
-            // prompt personalizado para o FM Claude utilizando o Bedrock
+
             var prompt = $@"Você é um assistente inteligente especialista em análise de documentos.
             Abaixo está o conteúdo extraído de todos os arquivos do sistema:
 
@@ -86,7 +85,7 @@ public class ChatFunction
 
             var bedrockResponse = await _bedrockClient.InvokeModelAsync(new InvokeModelRequest
             {
-                ModelId = "anthropic.claude-3-haiku-20240307-v1:0",
+                ModelId = "arn:aws:bedrock:us-east-1:484907506659:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0",
                 ContentType = "application/json",
                 Accept = "application/json",
                 Body = new MemoryStream(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(bedrockPayload)))
